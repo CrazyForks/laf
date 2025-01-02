@@ -200,17 +200,6 @@ export default function PolicyDataList() {
           <EmptyBox>
             <div>
               <span>{t("CollectionPanel.EmptyRuleTip")}</span>
-              <AddRulesModal
-                onSuccessSubmit={(data) => {
-                  setCurrentData(data);
-                  setRecord(JSON.stringify(data.value, null, 2));
-                  rulesListQuery.refetch();
-                }}
-              >
-                <span className="ml-2 cursor-pointer text-primary-600 hover:border-b-2 hover:border-primary-600">
-                  {t("CreateNow")}
-                </span>
-              </AddRulesModal>
             </div>
           </EmptyBox>
         )}

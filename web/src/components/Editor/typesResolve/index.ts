@@ -1,24 +1,41 @@
 import axios from "axios";
-import * as monaco from "monaco-editor";
 
 import { globalDeclare } from "./globals";
 
 import useGlobalStore from "@/pages/globalStore";
 
 async function loadPackageTypings(packageName: string) {
-  const { currentApp } = useGlobalStore.getState();
+  const cacheKey = `package-typings-${packageName}`;
+  const cache = localStorage.getItem(cacheKey);
 
-  const url = `//${currentApp?.host}`;
+  const getType = async (packageName: string) => {
+    const { currentApp } = useGlobalStore.getState();
 
-  const res = await axios({
-    url: `${url}/_/typing/package?packageName=${packageName}`,
-    method: "GET",
-    headers: {
-      "x-laf-develop-token": `${currentApp?.develop_token}`,
-    },
-  });
+    const url = `//${currentApp?.host}`;
 
-  return res.data;
+    const res = await axios({
+      url: `${url}/_/typing/package?packageName=${packageName}`,
+      method: "GET",
+      headers: {
+        "x-laf-develop-token": `${currentApp?.develop_token}`,
+      },
+    });
+
+    if (res.data?.code === 1 || !res.data?.data) {
+      localStorage.removeItem(cacheKey);
+    } else {
+      localStorage.setItem(cacheKey, JSON.stringify(res.data));
+    }
+    return res.data;
+  };
+
+  if (cache) {
+    getType(packageName);
+    return JSON.parse(cache);
+  }
+
+  const r = await getType(packageName);
+  return r;
 }
 
 /**
@@ -43,7 +60,7 @@ export class ImportParser {
     // parse static imports
     const staticImports = [...cleaned.matchAll(this.REGEX_DETECT_IMPORT)]
       .map((x) => x[1] ?? x[2])
-      .filter((x) => !!x)
+      .filter((x) => !!x && !x.startsWith("./") && !x.startsWith("../"))
       .map((imp) => {
         return imp;
       });
@@ -68,52 +85,37 @@ export class AutoImportTypings {
    * @param {string} source ts 代码
    * @returns
    */
-  async parse(source: string) {
+  async parse(source: string, monaco: any) {
     const rets = this._parser.parseDependencies(source);
     if (!rets || !rets.length) return;
 
     const newImports = rets.filter((pkg) => !this.isLoaded(pkg));
     for (const pkg of newImports) {
-      await this.loadDeclaration(pkg);
+      await this.loadDeclaration(pkg, monaco);
     }
   }
 
   /**
    * Load default typings
    */
-  loadDefaults() {
-    this.addExtraLib({ path: "globals.d.ts", content: globalDeclare });
-    // if (!this.isLoaded("@lafjs/cloud")) {
-    //   this.loadDeclaration("@lafjs/cloud");
-    // }
-    if (!this.isLoaded("globals")) {
-      this.loadDeclaration("globals");
-    }
-    if (!this.isLoaded("database-proxy")) {
-      this.loadDeclaration("database-proxy");
-    }
-    if (!this.isLoaded("database-ql")) {
-      this.loadDeclaration("database-ql");
-    }
-    if (!this.isLoaded("axios")) {
-      this.loadDeclaration("axios");
-    }
-    // if (!this.isLoaded('cloud-function-engine')) { this.loadDeclaration('cloud-function-engine') }
-    if (!this.isLoaded("mongodb")) {
-      this.loadDeclaration("mongodb");
-    }
-    if (!this.isLoaded("@types/node")) {
-      this.loadDeclaration("@types/node");
-    }
-    if (!this.isLoaded("ws")) {
-      this.loadDeclaration("ws");
-    }
-    if (!this.isLoaded("@aws-sdk/client-s3")) {
-      this.loadDeclaration("@aws-sdk/client-s3");
-    }
-    if (!this.isLoaded("@aws-sdk/s3-request-presigner")) {
-      this.loadDeclaration("@aws-sdk/s3-request-presigner");
-    }
+  loadDefaults(monaco: any) {
+    this.addExtraLib({ path: "globals.d.ts", content: globalDeclare, monaco });
+    [
+      "@lafjs/cloud",
+      "globals",
+      "database-proxy",
+      "database-ql",
+      "axios",
+      "mongodb",
+      "@types/node",
+      "ws",
+      "@aws-sdk/client-s3",
+      "@aws-sdk/s3-request-presigner",
+    ].forEach((v) => {
+      if (!this.isLoaded(v)) {
+        this.loadDeclaration(v, monaco);
+      }
+    });
   }
 
   /**
@@ -130,11 +132,14 @@ export class AutoImportTypings {
    * @param {string} packageName
    * @returns
    */
-  async loadDeclaration(packageName: string) {
+  async loadDeclaration(packageName: string, monaco: any) {
     if (this.isLoaded(packageName)) return;
     try {
-      const r = await loadPackageTypings(packageName).catch((err: any) => console.error(err));
+      this._loaded.push(packageName);
+
+      const r = await loadPackageTypings(packageName);
       if (r?.code) {
+        this._loaded = this._loaded.filter((x) => x !== packageName);
         return;
       }
 
@@ -144,13 +149,12 @@ export class AutoImportTypings {
         if (packageName === lib.packageName && lib.path !== `${packageName}/index.d.ts`) {
           const _lib = { ...lib };
           _lib.path = `${packageName}/index.d.ts`;
-          this.addExtraLib(_lib);
+          this.addExtraLib({ path: _lib.path, content: _lib.content, monaco });
         }
-        this.addExtraLib(lib);
+        this.addExtraLib({ path: lib.path, content: lib.content, monaco });
       }
-
-      this._loaded.push(packageName);
     } catch (error) {
+      this._loaded = this._loaded.filter((x) => x !== packageName);
       console.error(`failed to load package: ${packageName} :`, error);
     }
   }
@@ -160,27 +164,19 @@ export class AutoImportTypings {
    * @param {path: string, content: string} param0
    * @returns
    */
-  addExtraLib({ path, content }: { path: string; content: string }) {
-    const fullpath = `file:///node_modules/${path}`;
+  addExtraLib({ path, content, monaco }: { path: string; content: string; monaco: any }) {
+    const fullPath = `file:///node_modules/${path}`;
     const defaults = monaco.languages.typescript.typescriptDefaults;
-
     const loaded = defaults.getExtraLibs();
-    const keys = Object.keys(loaded);
 
-    if (keys.includes(fullpath)) {
-      console.log(`${path} already exists in ts extralib`);
+    if (fullPath in loaded) {
       return;
     }
     try {
-      defaults.addExtraLib(content, fullpath);
+      defaults.addExtraLib(content, fullPath);
     } catch (error) {
-      console.log(error, fullpath, keys);
+      console.log(error, fullPath);
       throw error;
     }
-  }
-
-  getExtraLibs() {
-    const defaults = monaco.languages.typescript.typescriptDefaults;
-    return defaults.getExtraLibs();
   }
 }

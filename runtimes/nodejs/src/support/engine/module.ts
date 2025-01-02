@@ -7,14 +7,12 @@ import { createRequire } from 'node:module'
 import * as path from 'node:path'
 import { ObjectId } from 'mongodb'
 
-const CUSTOM_DEPENDENCY_NODE_MODULES_PATH = `${Config.CUSTOM_DEPENDENCY_BASE_PATH}/node_modules/`
+export const CUSTOM_DEPENDENCY_NODE_MODULES_PATH = `${Config.CUSTOM_DEPENDENCY_BASE_PATH}/node_modules/`
 
 export class FunctionModule {
   protected static cache: Map<string, any> = new Map()
 
-  private static customRequire = createRequire(
-    CUSTOM_DEPENDENCY_NODE_MODULES_PATH,
-  )
+  static customRequire = createRequire(CUSTOM_DEPENDENCY_NODE_MODULES_PATH)
 
   static get(functionName: string): any {
     const moduleName = `@/${functionName}`
@@ -53,6 +51,9 @@ export class FunctionModule {
 
       // build function module
       const data = FunctionCache.get(fn)
+      if (!data) {
+        throw new Error(`function ${fn} not found`)
+      }
       const mod = this.compile(fn, data.source.compiled, fromModule)
 
       // cache module
@@ -86,7 +87,7 @@ export class FunctionModule {
       consoleInstance,
     )
     const options: RunningScriptOptions = {
-      filename: `FunctionModule.${functionName}`,
+      filename: functionName,
       displayErrors: true,
       contextCodeGeneration: {
         strings: true,
@@ -94,7 +95,7 @@ export class FunctionModule {
       },
     } as any
 
-    const script = this.createScript(wrapped, {})
+    const script = this.createScript(wrapped, options)
     return script.runInNewContext(sandbox, options)
   }
 
@@ -103,15 +104,12 @@ export class FunctionModule {
   }
 
   protected static wrap(code: string): string {
-    return `
-    const require = (name) => {
-      __from_modules.push(__filename)
-      return __require(name, __from_modules, __filename)
-    }
-
-    ${code}
-    module.exports;
-    `
+    // ensure 1 line to balance line offset of error stack
+    return [
+      `function require(name){__from_modules.push(__filename);return __require(name,__from_modules,__filename);}`,
+      `${code}`,
+      `\nmodule.exports;`,
+    ].join(' ')
   }
 
   /**
@@ -162,6 +160,7 @@ export class FunctionModule {
       exports: _module.exports,
       console: fConsole,
       __require: this.require.bind(this),
+      RegExp: RegExp,
       Buffer: Buffer,
       setImmediate: setImmediate,
       clearImmediate: clearImmediate,
